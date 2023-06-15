@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"sync"
+	"time"
 )
 
 var (
@@ -18,42 +20,36 @@ var (
 	}
 )
 
-type checkInfo struct {
-	url        string
-	statusCode int
+func urlGenerator(urlsCh chan string) {
+	for _, url := range urls {
+		urlsCh <- url
+		time.Sleep(time.Second * 5)
+	}
+	close(urlsCh)
 }
 
 func main() {
-	wait := make(chan struct{}, len(urls))      // chennal for syncronization
-	resultCh := make(chan checkInfo, len(urls)) //
-	for _, url := range urls {
-		go getHttpStatusCode(url, wait, resultCh)
-	}
-	for i := 0; i < len(urls); i++ {
-		<-wait
-	}
-	close(wait)
-	close(resultCh)
+	urlsCh := make(chan string)
+	go urlGenerator(urlsCh)
 
-	for info := range resultCh {
-		if isStatusCodeSuccess(info.statusCode) {
-			fmt.Println(info.url, " - OK")
-		} else {
-			fmt.Println(info.url, " - not OK")
-		}
+	var wg sync.WaitGroup
+	for url := range urlsCh {
+		wg.Add(1)
+		go getHttpStatusCode(url, &wg)
 	}
+
+	wg.Wait()
 }
 
-func getHttpStatusCode(url string, wait chan struct{}, ch chan checkInfo) {
-	defer func() {
-		wait <- struct{}{}
-	}()
+func getHttpStatusCode(url string, wg *sync.WaitGroup) {
+	defer wg.Done()
 	resp, err := http.Get(url)
-	if err != nil {
-		ch <- checkInfo{url, 500}
+	if err != nil || !(isStatusCodeSuccess(resp.StatusCode)) {
+		fmt.Println(url, " - not OK")
 		return
 	}
-	ch <- checkInfo{url, resp.StatusCode}
+	fmt.Println(url, " - OK")
+
 }
 
 func isStatusCodeSuccess(code int) bool {
