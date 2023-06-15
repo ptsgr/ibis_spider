@@ -18,23 +18,42 @@ var (
 	}
 )
 
-func main() {
-	for _, url := range urls {
-		if isStatusCodeSuccess(getHttpStatusCode(url)) {
-			fmt.Println(url, " - OK")
+type checkInfo struct {
+	url        string
+	statusCode int
+}
 
+func main() {
+	wait := make(chan struct{}, len(urls))      // chennal for syncronization
+	resultCh := make(chan checkInfo, len(urls)) //
+	for _, url := range urls {
+		go getHttpStatusCode(url, wait, resultCh)
+	}
+	for i := 0; i < len(urls); i++ {
+		<-wait
+	}
+	close(wait)
+	close(resultCh)
+
+	for info := range resultCh {
+		if isStatusCodeSuccess(info.statusCode) {
+			fmt.Println(info.url, " - OK")
 		} else {
-			fmt.Println(url, " - not OK")
+			fmt.Println(info.url, " - not OK")
 		}
 	}
 }
 
-func getHttpStatusCode(url string) int {
+func getHttpStatusCode(url string, wait chan struct{}, ch chan checkInfo) {
+	defer func() {
+		wait <- struct{}{}
+	}()
 	resp, err := http.Get(url)
 	if err != nil {
-		return 500
+		ch <- checkInfo{url, 500}
+		return
 	}
-	return resp.StatusCode
+	ch <- checkInfo{url, resp.StatusCode}
 }
 
 func isStatusCodeSuccess(code int) bool {
