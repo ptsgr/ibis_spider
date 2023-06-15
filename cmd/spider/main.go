@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"sync"
@@ -12,6 +13,7 @@ var (
 		"http://ozon.ru",
 		"https://ozon.ru",
 		"http://google.com",
+		"https://google.com",
 		"http://somesite.com",
 		"http://non-existent.domain.tld",
 		"https://ya.ru",
@@ -22,8 +24,8 @@ var (
 
 func urlGenerator(urlsCh chan string) {
 	for _, url := range urls {
+		time.Sleep(time.Second * 1)
 		urlsCh <- url
-		time.Sleep(time.Second * 5)
 	}
 	close(urlsCh)
 }
@@ -32,24 +34,52 @@ func main() {
 	urlsCh := make(chan string)
 	go urlGenerator(urlsCh)
 
+	successCouter := newCounter()
 	var wg sync.WaitGroup
+	wait := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-wait:
+				return
+			default:
+				if successCouter.Get() > 1 {
+					cancel()
+					<-wait
+					return
+				}
+			}
+		}
+	}()
+
 	for url := range urlsCh {
 		wg.Add(1)
-		go getHttpStatusCode(url, &wg)
+		go getHttpStatusCode(ctx, url, successCouter, &wg)
 	}
-
+	wait <- struct{}{}
 	wg.Wait()
+
 }
 
-func getHttpStatusCode(url string, wg *sync.WaitGroup) {
+func getHttpStatusCode(ctx context.Context, url string, successCouter *counter, wg *sync.WaitGroup) {
 	defer wg.Done()
-	resp, err := http.Get(url)
-	if err != nil || !(isStatusCodeSuccess(resp.StatusCode)) {
-		fmt.Println(url, " - not OK")
-		return
-	}
-	fmt.Println(url, " - OK")
 
+	select {
+	case <-ctx.Done():
+		fmt.Println(url, " - terminated normally")
+	default:
+		resp, err := http.Get(url)
+		if err != nil || !(isStatusCodeSuccess(resp.StatusCode)) {
+			successCouter.Reset()
+			fmt.Println(url, " - not OK")
+			return
+		}
+		successCouter.Add()
+		fmt.Println(url, " - OK")
+	}
 }
 
 func isStatusCodeSuccess(code int) bool {
