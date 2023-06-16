@@ -1,11 +1,14 @@
 package main
 
 import (
-	"context"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/ptsgr/ibis_spider/internal/storage"
 )
 
 var (
@@ -13,7 +16,6 @@ var (
 		"http://ozon.ru",
 		"https://ozon.ru",
 		"http://google.com",
-		"https://google.com",
 		"http://somesite.com",
 		"http://non-existent.domain.tld",
 		"https://ya.ru",
@@ -24,8 +26,8 @@ var (
 
 func urlGenerator(urlsCh chan string) {
 	for _, url := range urls {
-		time.Sleep(time.Second * 1)
 		urlsCh <- url
+		time.Sleep(time.Second * 1)
 	}
 	close(urlsCh)
 }
@@ -34,52 +36,49 @@ func main() {
 	urlsCh := make(chan string)
 	go urlGenerator(urlsCh)
 
-	successCouter := newCounter()
-	var wg sync.WaitGroup
-	wait := make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-wait:
-				return
-			default:
-				if successCouter.Get() > 1 {
-					cancel()
-					<-wait
-					return
-				}
-			}
-		}
-	}()
+	dsn := os.Getenv("STORAGE_DSN")
+	if len(dsn) == 0 {
+		log.Fatalf("Storage DSN not set")
+	}
 
+	s, err := storage.NewGormStorage(dsn)
+	if err != nil {
+		log.Fatalf("Cannot init Storage DB, err: %v", err)
+		return
+	}
+
+	runID, err := s.CreateRun()
+	if err != nil {
+		log.Fatalf("Cannot create Storage Run entity, err: %v", err)
+		return
+	}
+
+	var wg sync.WaitGroup
 	for url := range urlsCh {
 		wg.Add(1)
-		go getHttpStatusCode(ctx, url, successCouter, &wg)
+		go getHttpStatusCode(url, s, runID, &wg)
 	}
-	wait <- struct{}{}
-	wg.Wait()
 
+	wg.Wait()
 }
 
-func getHttpStatusCode(ctx context.Context, url string, successCouter *counter, wg *sync.WaitGroup) {
+func getHttpStatusCode(url string, s storage.Storage, runID int, wg *sync.WaitGroup) {
 	defer wg.Done()
-
-	select {
-	case <-ctx.Done():
-		fmt.Println(url, " - terminated normally")
-	default:
-		resp, err := http.Get(url)
-		if err != nil || !(isStatusCodeSuccess(resp.StatusCode)) {
-			successCouter.Reset()
-			fmt.Println(url, " - not OK")
-			return
+	resp, err := http.Get(url)
+	if err != nil || !(isStatusCodeSuccess(resp.StatusCode)) {
+		err = s.SetURLStatus(runID, url, storage.StatusNOK)
+		if err != nil {
+			log.Fatalf("Cannot set URL status in Storage, err: %v", err)
 		}
-		successCouter.Add()
-		fmt.Println(url, " - OK")
+		fmt.Println(url, " - not OK")
+		return
 	}
+	err = s.SetURLStatus(runID, url, storage.StatusOK)
+	if err != nil {
+		log.Fatalf("Cannot set URL status in Storage, err: %v", err)
+	}
+	fmt.Println(url, " - OK")
+
 }
 
 func isStatusCodeSuccess(code int) bool {
